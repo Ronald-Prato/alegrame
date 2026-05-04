@@ -116,28 +116,35 @@ export function createPeriodAnchorTools() {
         'Convierte lenguaje relativo («el mes pasado», «este mes», «este año», «últimos 30 días») en **`fecha_inicio`** y **`fecha_fin`** inclusivas formato **`YYYY-MM-DD`**, usando la fecha/hora **actual del servidor** y una **zona horaria IANA** (ej. `America/Bogota`, `America/Santiago`). ' +
         'Llámala **antes** de ejecutar estadísticas cuando el usuario no dio fechas explícitas. `this_calendar_month` = del día 1 del mes hasta **hoy**; `rolling_inclusive_days` requiere `dias_rolling_inclusive`.',
       parameters: z.object({
+        /**
+         * OpenAI Responses exige que **todas** las claves de `properties` estén en `required`;
+         * no usar `.optional()` en Zod aquí — usa `""` o `null` según aplique.
+         */
         zona_horaria: z
           .string()
-          .optional()
           .describe(
-            'Zona IANA (`America/Bogota`, `America/Santiago`, `America/Mexico_City`, …). Omite o deja vacío para usar **`America/Bogota`** por defecto.',
+            'Zona horaria IANA (`America/Bogota`, `America/Santiago`, …). Usa **`""`** (cadena vacía) si debe aplicarse el valor por defecto **America/Bogota**.',
           ),
         preset: z.enum(PRESETS).describe('Tipo de período a resolver.'),
         dias_rolling_inclusive: z
-          .number()
-          .int()
-          .optional()
-          .describe('Solo si `preset` es `rolling_inclusive_days`: cuántos días hacia atrás desde **hoy** inclusive.'),
+          .union([
+            z.number().int().min(1).max(366),
+            z.null(),
+          ])
+          .describe(
+            '**`null`** salvo cuando `preset` es `rolling_inclusive_days`; entonces envía entero entre 1 y 366 (días hacia atrás desde hoy inclusive).',
+          ),
       }),
       execute: async (args) => {
-        const zone = parseZone(args.zona_horaria ?? '');
+        const zone = parseZone(args.zona_horaria ?? "");
         if (!zone.ok) return JSON.stringify({ error: zone.error });
 
-        const bounds = boundsForPreset(
-          zone.tz,
-          args.preset,
-          args.dias_rolling_inclusive ?? undefined,
-        );
+        const dias =
+          args.dias_rolling_inclusive === null
+            ? undefined
+            : args.dias_rolling_inclusive;
+
+        const bounds = boundsForPreset(zone.tz, args.preset, dias);
         if (!bounds.ok) return JSON.stringify({ error: bounds.error });
 
         const nowUtc = DateTime.utc().toISO();
