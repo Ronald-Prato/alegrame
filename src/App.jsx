@@ -166,6 +166,10 @@ function getInitialTheme() {
 
 const DEFAULT_CONVERSATION_TITLE = "Nueva conversación";
 
+/** Debe coincidir con `DEFAULT_RUT_PDF_USER_COPY` en convex/agentActions.ts (texto guardado si solo hay PDF). */
+const DEFAULT_RUT_PDF_USER_COPY =
+  "Adjunto PDF de certificado RUT (Chile). Extrae los datos para dar de alta el contacto en Alegra: usa **validar_extraccion_contacto_desde_documento** con lo leído, muestra un resumen claro y **no** llames **crear_contacto_alegra** hasta que confirme explícitamente.";
+
 /** Logo RML SAS en sidebar: recorte franja central del JPEG (ratio ancho:alto constante). */
 function RmlSasBrandLogo({ className = "" }) {
   const cls = ["brand-logo-crop", className].filter(Boolean).join(" ");
@@ -233,6 +237,8 @@ function ChatWorkspace({ theme, onToggleTheme }) {
 
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(false);
+  /** Texto exacto que persistirá Convex (`messages.content`) hasta que llegue por suscripción. */
+  const [pendingOptimisticUser, setPendingOptimisticUser] = useState(null);
   const [error, setError] = useState(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const scrollContainerRef = useRef(null);
@@ -257,6 +263,25 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     (m) => m.role === "assistant" && m.streaming === true,
   );
   const showThinking = loading && !streamingAssistant;
+
+  const displayMessages = useMemo(() => {
+    const base = messages ?? [];
+    if (!pendingOptimisticUser) return base;
+    const echoed = base.some(
+      (m) =>
+        m.role === "user" &&
+        m.content === pendingOptimisticUser.storedContent,
+    );
+    if (echoed) return base;
+    return [
+      ...base,
+      {
+        _id: "__optimistic_user__",
+        role: "user",
+        content: pendingOptimisticUser.storedContent,
+      },
+    ];
+  }, [messages, pendingOptimisticUser]);
 
   const conversationReady = canLoadMessages;
 
@@ -297,6 +322,20 @@ function ChatWorkspace({ theme, onToggleTheme }) {
   }, [conversationId]);
 
   useEffect(() => {
+    setPendingOptimisticUser(null);
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!pendingOptimisticUser || messages === undefined) return;
+    const echoed = messages.some(
+      (m) =>
+        m.role === "user" &&
+        m.content === pendingOptimisticUser.storedContent,
+    );
+    if (echoed) setPendingOptimisticUser(null);
+  }, [messages, pendingOptimisticUser]);
+
+  useEffect(() => {
     if (!isNarrowSidebar || !mobileSidebarOpen) return;
     function onKey(e) {
       if (e.key === "Escape") setMobileSidebarOpen(false);
@@ -321,7 +360,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     queueMicrotask(() => {
       el.scrollTop = el.scrollHeight;
     });
-  }, [messages, loading, showThinking, conversationReady]);
+  }, [displayMessages, loading, showThinking, conversationReady]);
 
   useEffect(() => {
     const rec = speechRecognitionRef.current;
@@ -461,7 +500,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     closeMobileSidebar();
   }
 
-  async function handleSubmit(e) {
+  function handleSubmit(e) {
     e?.preventDefault?.();
     abortSpeechDictation();
     const text = draft.trim();
@@ -469,6 +508,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
 
     setError(null);
     setDraft("");
+    setPendingOptimisticUser({ storedContent: text });
     setLoading(true);
     stickToBottomRef.current = true;
     queueMicrotask(() => {
@@ -476,18 +516,17 @@ function ChatWorkspace({ theme, onToggleTheme }) {
       if (el) el.scrollTop = el.scrollHeight;
     });
 
-    try {
-      await sendMessage({
-        ownerSessionId,
-        conversationId,
-        content: text,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
+    sendMessage({
+      ownerSessionId,
+      conversationId,
+      content: text,
+    })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        setPendingOptimisticUser(null);
+      })
+      .finally(() => setLoading(false));
   }
 
   function readFileAsDataUrl(file) {
@@ -520,20 +559,31 @@ function ChatWorkspace({ theme, onToggleTheme }) {
       if (el) el.scrollTop = el.scrollHeight;
     });
 
+    const content = draft.trim();
+    const messageText = content || DEFAULT_RUT_PDF_USER_COPY;
+    const safeName = file.name.trim() || "documento.pdf";
+    const storedContent = `${messageText}\n\n[Adjunto PDF: ${safeName}]`;
+    setDraft("");
+    setPendingOptimisticUser({ storedContent });
+
     try {
       const dataUrl = await readFileAsDataUrl(file);
-      const content = draft.trim();
-      setDraft("");
-      await sendMessage({
+      sendMessage({
         ownerSessionId,
         conversationId,
         content,
         rutPdf: { filename: file.name, dataUrl },
-      });
+      })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          setError(msg);
+          setPendingOptimisticUser(null);
+        })
+        .finally(() => setLoading(false));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
-    } finally {
+      setPendingOptimisticUser(null);
       setLoading(false);
     }
   }
@@ -542,7 +592,8 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     conversationReady &&
     messages !== undefined &&
     messages.length === 0 &&
-    !loading;
+    !loading &&
+    !pendingOptimisticUser;
 
   const hasEmptyDraft =
     conversations !== undefined && conversations.some(isEmptyDraftConversation);
@@ -813,7 +864,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
                   onScroll={handleChatScroll}
                 >
                   <ul className="chat-messages" aria-live="polite">
-                    {messages?.map((m) => {
+                    {displayMessages.map((m) => {
                       if (m.uiLogKind === "conversation_compacted") {
                         return (
                           <li
