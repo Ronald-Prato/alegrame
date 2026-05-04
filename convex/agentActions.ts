@@ -7,9 +7,20 @@ import {
   getDefaultModelSettings,
   run,
   user,
+  type RunHandoffCallItem,
+  type RunHandoffOutputItem,
 } from "@openai/agents";
 import type { StreamedRunResult } from "@openai/agents";
-import { setDefaultOpenAIKey } from "@openai/agents-openai";
+import {
+  OpenAIResponsesCompactionSession,
+  setDefaultOpenAIKey,
+} from "@openai/agents-openai";
+import {
+  MemorySession,
+  type AgentInputItem,
+  type RunItem,
+  type RunToolCallOutputItem,
+} from "@openai/agents-core";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { ActionCtx } from "./_generated/server";
@@ -20,9 +31,185 @@ import { createAlegraContactTools } from "./tools/alegraContacts";
 import { createAlegraEstimateTools } from "./tools/alegraEstimates";
 import { createAlegraInvoiceTools } from "./tools/alegraInvoices";
 import { createAlegraColombiaPaymentCatalogTools } from "./tools/alegraColombiaPaymentCatalog";
-import type { RunItem, RunToolCallOutputItem } from "@openai/agents-core";
+import { createAlegraStatsTools } from "./tools/alegraStats";
 
 const MAX_CONTEXT_MESSAGES = 40;
+
+/** User + assistant text turns in `conversations.messages` (las filas compaction no cuentan). */
+const CONTEXT_COMPACTION_PLAIN_MIN = 10;
+
+type ConvexContextEntry =
+  | { role: "user" | "assistant"; content: string }
+  | { kind: "compaction"; payloadJson: string };
+
+function isConvexCompactionEntry(
+  entry: ConvexContextEntry,
+): entry is { kind: "compaction"; payloadJson: string } {
+  return "kind" in entry && entry.kind === "compaction";
+}
+
+function countPlainContextTurns(entries: ConvexContextEntry[]): number {
+  return entries.filter((e) => !isConvexCompactionEntry(e)).length;
+}
+
+function extractUserMessageText(item: {
+  content:
+    | string
+    | readonly { type?: string; text?: string }[];
+}): string {
+  const c = item.content;
+  if (typeof c === "string") return c.trim();
+  const parts: string[] = [];
+  for (const part of c ?? []) {
+    if (
+      part &&
+      typeof part === "object" &&
+      part.type === "input_text" &&
+      typeof part.text === "string"
+    ) {
+      parts.push(part.text);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+function extractAssistantMessageText(item: {
+  content:
+    | string
+    | readonly { type?: string; text?: string }[];
+}): string {
+  const c = item.content;
+  if (typeof c === "string") return c.trim();
+  const parts: string[] = [];
+  for (const part of c ?? []) {
+    if (
+      part &&
+      typeof part === "object" &&
+      part.type === "output_text" &&
+      typeof part.text === "string"
+    ) {
+      parts.push(part.text);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+function convexContextToAgentItems(entries: ConvexContextEntry[]): AgentInputItem[] {
+  return entries.map((e) => {
+    if (isConvexCompactionEntry(e)) {
+      return JSON.parse(e.payloadJson) as AgentInputItem;
+    }
+    return e.role === "user" ? user(e.content) : assistant(e.content);
+  });
+}
+
+function agentItemsToConvexContext(items: AgentInputItem[]): ConvexContextEntry[] {
+  return items.map((item) => {
+    if (item.type === "compaction") {
+      return {
+        kind: "compaction",
+        payloadJson: JSON.stringify(item),
+      };
+    }
+    if (item.type === "message" && item.role === "user") {
+      const content = extractUserMessageText(item);
+      return {
+        role: "user",
+        content: content || "",
+      };
+    }
+    if (item.type === "message" && item.role === "assistant") {
+      const content = extractAssistantMessageText(item);
+      return {
+        role: "assistant",
+        content: content || "",
+      };
+    }
+    throw new Error(
+      `No se puede mapar item de compaction a Convex: tipo ${JSON.stringify(item && "type" in item ? item.type : "?")}`,
+    );
+  });
+}
+
+async function compactContextWithAgentsSdk(
+  modelName: string,
+  agentItems: AgentInputItem[],
+): Promise<AgentInputItem[]> {
+  const session = new OpenAIResponsesCompactionSession({
+    underlyingSession: new MemorySession({ initialItems: agentItems }),
+    model: modelName,
+    compactionMode: "input",
+    shouldTriggerCompaction: () => false,
+  });
+  const result = await session.runCompaction({ force: true, compactionMode: "input" });
+  if (!result) {
+    throw new Error("OpenAI compaction no produjo resultado (runCompaction devolvió null).");
+  }
+  return session.getItems();
+}
+
+async function maybeCompactConversationMessages(
+  ctx: ActionCtx,
+  args: { conversationId: Id<"conversations"> },
+  meta: {
+    plainCountMinimum: number;
+    modelName: string;
+    history: ConvexContextEntry[];
+  },
+): Promise<{ compacted: boolean }> {
+  if (countPlainContextTurns(meta.history) < meta.plainCountMinimum) {
+    return { compacted: false };
+  }
+  try {
+    const agentItems = convexContextToAgentItems(meta.history);
+    const compactedItems = await compactContextWithAgentsSdk(meta.modelName, agentItems);
+    const nextEntries = agentItemsToConvexContext(compactedItems);
+    await ctx.runMutation(internal.conversations.internalSetContext, {
+      conversationId: args.conversationId,
+      messages: nextEntries,
+    });
+    await ctx.runMutation(internal.conversations.internalTrimContextTail, {
+      conversationId: args.conversationId,
+      maxMessages: MAX_CONTEXT_MESSAGES,
+    });
+    await ctx.runMutation(internal.messages.internalAppendCompactNotice, {
+      conversationId: args.conversationId,
+    });
+    return { compacted: true };
+  } catch (err) {
+    console.error("maybeCompactConversationMessages failed:", err);
+    return { compacted: false };
+  }
+}
+
+const STATS_AGENT_INSTRUCTIONS = [
+  '# Contexto multi-agente',
+  'Los traspasos entre agentes ocurren en segundo plano; **no** menciones el cambio de agente salvo que el usuario pregunte.',
+  '',
+  'Eres el **asistente exclusivo de estadísticas** sobre datos en **Alegra** (facturas de venta, facturas de proveedor y contactos).',
+  '',
+  '## Regla obligatoria: rango de fechas para informes temporales',
+  '- Para rankings de ventas, clientes que más compraron, productos más/menos vendidos, comparativos mensuales ventas vs compras y gastos por período necesitas **`fecha_inicio`** y **`fecha_fin`** (`YYYY-MM-DD`) **antes** de llamar herramientas.',
+  '- Si el usuario da solo un año natural (ej. 2025), usa **2025-01-01** y **2025-12-31** y confírmalo en una línea.',
+  '- Si dice «últimos 4 meses» sin fechas exactas, **pregunta** las dos fechas concretas o pide cuántos meses y calcula las cotas **confirmadas por el usuario** (no inventes el día «hoy»).',
+  '- **Excepción**: `stats_contar_clientes_por_ciudad` es un **snapshot** del maestro de contactos y **no** exige rango de ventas.',
+  '',
+  '## Formato',
+  'Responde en **español**, Markdown (`##`, tablas, **negritas**). Sé explícito con métricas y limitaciones.',
+  '',
+  '## Alcance',
+  '- Solo lecturas agregadas mediante tus herramientas; **no** uses herramientas de alta/edición del otro agente.',
+  '- Para «mejor cliente» aclara si es por **facturación total** (por defecto en rankings), **número de facturas** u otro criterio.',
+  '- Totales pueden incluir impuestos según configuración Alegra — dilo cuando corresponda.',
+  '- Pagos por «declaración de renta» suelen estar en **facturas de proveedor** con texto/categorías heterogéneas; usa filtros de texto y advierte si puede haber pagos fuera de Alegra.',
+  '',
+  '## Herramientas disponibles',
+  '- **stats_ranking_clientes_facturacion**: ranking de clientes por suma de `total` de facturas de venta en el rango.',
+  '- **stats_ranking_productos_por_lineas_factura**: productos más/menos vendidos por líneas (`cantidad` o `importe` estimado); puede fallar si hay demasiadas facturas — reduce fechas.',
+  '- **stats_comparativo_mensual_ventas_vs_compras**: serie mensual ventas vs compras a proveedores (proxy de margen operativo simple).',
+  '- **stats_contar_clientes_por_ciudad**: cuenta clientes cuya ciudad coincide (útil Bogotá).',
+  '- **stats_facturas_proveedor_filtradas**: suma/listado de facturas de proveedor en rango con **texto_filtro** opcional (ej. «renta», «declaracion»).',
+].join('\n');
 
 const AGENT_INSTRUCTIONS = [
   'Eres un asistente **solo** para temas relacionados con **Alegra** y el **negocio** de la empresa que usa Alegra (inventario, contactos/clientes/proveedores, **cotizaciones**, **facturas de venta**, altas y cambios de datos).',
@@ -37,13 +224,17 @@ const AGENT_INSTRUCTIONS = [
   '- Si algo va fuera de alcance, declínalo en una frase y ofrece ayuda solo con Alegra/inventario/contactos/cotizaciones/facturas.',
   '- Saludos cortos sí; recuerda que puedes **inventario, contactos, cotizaciones y facturas en Alegra** cuando lo necesiten.',
   '',
+  '### Estadísticas e informes numéricos',
+  '- Preguntas de **estadísticas**, **rankings**, **totales por fechas**, **productos más/menos vendidos**, **cliente que más compró o mejor cliente por facturación**, **ventas por mes / últimos meses**, **comparativos de ventas vs compras**, **cuántos clientes en una ciudad**, **sumas de facturas de proveedor** ligadas a renta/declaraciones u otros gastos: **transfiere** al agente **`EstadisticasAlegra`** con la herramienta de handoff **`transfer_to_EstadisticasAlegra`** (no intentes resolverlas solo con listados manuales de facturas).',
+  '- **Antes de transferir**, si el usuario no dio **`fecha_inicio`** y **`fecha_fin`** (`YYYY-MM-DD`) para un informe temporal, **pídeselas**. Si la pregunta es solo «cuántos clientes en Bogotá» (sin serie temporal de ventas), puedes transferir igual — el especialista no necesita rango de ventas para ese caso.',
+  '',
   '### Negocio: «mangas» = ítems del inventario',
   '- Si el usuario dice **«mangas»**, **«manga»** o frases como «mangas de silicona», «mangas naranjas», etc., en **este negocio** casi siempre habla de **productos registrados en Alegra** (línea de mangas / fundas / protectores en catálogo), **no** de otros usos coloquiales de la palabra.',
   '- **No** asumas que la pregunta va solo sobre **precio** o **margen**: salvo que pregunte expresamente por precio/costo, entiende la consulta como **inventario**: qué hay, cuántas unidades, referencias/SKU, variantes (medidas, colores). Ofrece precio **junto con** existencias y datos del ítem, no sustituyas la respuesta por un monólogo sobre precio.',
   '- Para mangas usa **listar_inventario_alegra** con `query` útil: «manga», «mangas», «silicona», color, pulgadas/cm, o la referencia si la dan; si vacía, reintenta con otro término.',
   '',
   '## Herramientas Alegra (API REST)',
-  'Tienes **diecinueve** herramientas independientes; puedes **llamarlas en cadena** en un mismo turno (p. ej. listar contactos → crear factura borrador → vista previa → abrir con timbre).',
+  'Tienes herramientas de **operación** sobre inventario, contactos, cotizaciones y facturas de venta; puedes encadenarlas (p. ej. listar contactos → crear factura borrador → vista previa → abrir con timbre). Para **estadísticas** usa la transferencia **`transfer_to_EstadisticasAlegra`**.',
   '',
   '### Inventario / ítems',
   '- **listar_inventario_alegra**: GET `/items` — catálogo, ids, stock, precios.',
@@ -154,7 +345,23 @@ const AGENT_INSTRUCTIONS = [
   'Las herramientas son opcionales cuando el usuario saluda sin pedir acción todavía.',
 ].join('\n');
 
-function createAlegraAgent(modelName: string) {
+function createEstadisticasAlegraAgent(modelName: string) {
+  return new Agent({
+    name: "EstadisticasAlegra",
+    handoffDescription:
+      "Úsalo **en lugar del asistente principal** cuando la conversación sea de **estadísticas o informes numéricos** sobre datos históricos en Alegra: ejemplos «¿Cuál fue el producto más vendido del 2025?», «¿Qué cliente nos compró más?», «¿Cuál es nuestro mejor cliente por facturación?», ventas en los últimos cuatro meses, ranking de productos más vendidos y menos vendidos en un año, mes de mayor diferencia entre ventas de facturación y compras a proveedores (proxy de margen operativo simple), cuántos clientes hay en Bogotá según dirección en contactos, cuánto se registró como gasto relacionado con declaración de renta en facturas de proveedor mediante filtros por texto/categorías. **Regla:** para cualquier **resumen global en el tiempo** debes tener siempre **fecha_inicio** y **fecha_fin** (`YYYY-MM-DD`) antes de ejecutar herramientas de agregación; si el usuario solo da el año, convierte a 1 enero / 31 diciembre y confirma.",
+    instructions: STATS_AGENT_INSTRUCTIONS,
+    model: modelName,
+    modelSettings: {
+      ...getDefaultModelSettings(modelName),
+      toolChoice: "auto",
+    },
+    tools: createAlegraStatsTools(),
+  });
+}
+
+function createAlegraOrchestratorAgent(modelName: string) {
+  const estadisticasAgent = createEstadisticasAlegraAgent(modelName);
   const tools = [
     ...createAlegraItemTools(),
     ...createAlegraContactTools(),
@@ -165,7 +372,7 @@ function createAlegraAgent(modelName: string) {
   return new Agent({
     name: "Asistente Alegra",
     handoffDescription:
-      "Asistente de inventario, contactos, cotizaciones y facturas en Alegra",
+      "Asistente principal de inventario, contactos, cotizaciones y facturas de venta en Alegra (operaciones del día a día). Para **estadísticas, rankings, totales históricos o cuadros por fechas**, transfiere al agente **EstadisticasAlegra**.",
     instructions: AGENT_INSTRUCTIONS,
     model: modelName,
     modelSettings: {
@@ -173,6 +380,7 @@ function createAlegraAgent(modelName: string) {
       toolChoice: "auto",
     },
     tools,
+    handoffs: [estadisticasAgent],
   });
 }
 
@@ -238,6 +446,7 @@ async function consumeAgentStreamIntoConvex(
   };
 
   try {
+    let lastAgentUiName = "";
     for await (const ev of streamResult) {
       if (ev.type === "raw_model_stream_event") {
         const data = ev.data as { type?: string; delta?: string };
@@ -251,6 +460,22 @@ async function consumeAgentStreamIntoConvex(
             await flushBuffer();
             lastFlush = now;
           }
+        }
+      } else if (ev.type === "agent_updated_stream_event") {
+        const nextName = ev.agent.name?.trim() ?? "";
+        if (nextName && nextName !== lastAgentUiName) {
+          lastAgentUiName = nextName;
+          const callId = `agent-active-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          await ctx.runMutation(internal.messages.internalAppendToolEvent, {
+            messageId,
+            callId,
+            toolName: `__agent_active__${nextName.replace(/\s+/g, "_")}`,
+          });
+          await ctx.runMutation(internal.messages.internalCompleteToolEvent, {
+            messageId,
+            callId,
+            failed: false,
+          });
         }
       } else if (ev.type === "run_item_stream_event") {
         if (ev.name === "tool_called") {
@@ -283,6 +508,35 @@ async function consumeAgentStreamIntoConvex(
               callId: meta.callId,
               failed,
             });
+          }
+        } else if (ev.name === "handoff_requested") {
+          const item = ev.item;
+          if (item.type === "handoff_call_item") {
+            const hi = item as RunHandoffCallItem;
+            const raw = hi.rawItem as { callId?: string };
+            const callId = raw.callId?.trim();
+            if (callId) {
+              const target = hi.agent?.name ?? "EstadisticasAlegra";
+              await ctx.runMutation(internal.messages.internalAppendToolEvent, {
+                messageId,
+                callId,
+                toolName: `__handoff__${target.replace(/\s+/g, "_")}`,
+              });
+            }
+          }
+        } else if (ev.name === "handoff_occurred") {
+          const item = ev.item;
+          if (item.type === "handoff_output_item") {
+            const hi = item as RunHandoffOutputItem;
+            const raw = hi.rawItem as { callId?: string };
+            const callId = raw.callId?.trim();
+            if (callId) {
+              await ctx.runMutation(internal.messages.internalCompleteToolEvent, {
+                messageId,
+                callId,
+                failed: false,
+              });
+            }
           }
         }
       }
@@ -348,7 +602,7 @@ async function consumeAgentStreamIntoConvex(
 
 async function runStreamingAgentTurn(
   ctx: ActionCtx,
-  history: { role: string; content: string }[],
+  contextEntries: ConvexContextEntry[],
   messageId: Id<"messages">,
   pdfAttachment?: { dataUrl: string; filename: string },
 ): Promise<void> {
@@ -363,28 +617,31 @@ async function runStreamingAgentTurn(
     process.env.OPENAI_MODEL?.trim() || "gpt-5.4-mini";
   setDefaultOpenAIKey(apiKey);
 
-  const agent = createAlegraAgent(modelName);
-  const input = history.map((m, i) => {
-    const isLast = i === history.length - 1;
-    if (
-      m.role === "user" &&
-      isLast &&
-      pdfAttachment &&
-      pdfAttachment.dataUrl.trim()
-    ) {
-      return user([
-        { type: "input_text", text: m.content },
-        {
-          type: "input_file",
-          file: pdfAttachment.dataUrl.trim(),
-          filename: pdfAttachment.filename.trim() || "documento.pdf",
-        },
-      ]);
-    }
-    return m.role === "user" ? user(m.content) : assistant(m.content);
-  });
+  const agent = createAlegraOrchestratorAgent(modelName);
+  const agentItems = convexContextToAgentItems(contextEntries);
+  let inputItems: AgentInputItem[] = agentItems;
 
-  const streamResult = await run(agent, input, {
+  const pdf = pdfAttachment;
+  if (pdf?.dataUrl.trim() && agentItems.length > 0) {
+    const lastIdx = agentItems.length - 1;
+    const last = agentItems[lastIdx];
+    if (last.type === "message" && last.role === "user") {
+      const text = extractUserMessageText(last);
+      inputItems = [
+        ...agentItems.slice(0, lastIdx),
+        user([
+          { type: "input_text", text: text },
+          {
+            type: "input_file",
+            file: pdf.dataUrl.trim(),
+            filename: pdf.filename.trim() || "documento.pdf",
+          },
+        ]),
+      ];
+    }
+  }
+
+  const streamResult = await run(agent, inputItems, {
     stream: true,
     maxTurns: 25,
   });
@@ -419,6 +676,10 @@ export const sendMessage = action({
     if (!messageText.trim()) {
       throw new Error("El mensaje está vacío.");
     }
+
+    const apiKey = process.env.OPENAI_API_KEY ?? "";
+    const modelName =
+      process.env.OPENAI_MODEL?.trim() || "gpt-5.4-mini";
 
     if (pdf) {
       const url = pdf.dataUrl.trim();
@@ -467,7 +728,7 @@ export const sendMessage = action({
     const convForAgent = await ctx.runQuery(api.conversations.get, {
       conversationId: args.conversationId,
     });
-    const history = convForAgent?.messages ?? [];
+    const history = (convForAgent?.messages ?? []) as ConvexContextEntry[];
 
     const messageId: Id<"messages"> = await ctx.runMutation(
       internal.messages.internalCreateAssistantDraft,
@@ -502,6 +763,19 @@ export const sendMessage = action({
         maxMessages: MAX_CONTEXT_MESSAGES,
       });
 
+      const convAfterTurn = await ctx.runQuery(api.conversations.get, {
+        conversationId: args.conversationId,
+      });
+      await maybeCompactConversationMessages(
+        ctx,
+        { conversationId: args.conversationId },
+        {
+          plainCountMinimum: CONTEXT_COMPACTION_PLAIN_MIN,
+          modelName,
+          history: (convAfterTurn?.messages ?? []) as ConvexContextEntry[],
+        },
+      );
+
       return { ok: true as const, messageId };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -523,6 +797,20 @@ export const sendMessage = action({
         conversationId: args.conversationId,
         maxMessages: MAX_CONTEXT_MESSAGES,
       });
+
+      setDefaultOpenAIKey(apiKey);
+      const convAfterError = await ctx.runQuery(api.conversations.get, {
+        conversationId: args.conversationId,
+      });
+      await maybeCompactConversationMessages(
+        ctx,
+        { conversationId: args.conversationId },
+        {
+          plainCountMinimum: CONTEXT_COMPACTION_PLAIN_MIN,
+          modelName,
+          history: (convAfterError?.messages ?? []) as ConvexContextEntry[],
+        },
+      );
 
       return { ok: false as const, messageId, error: msg };
     }

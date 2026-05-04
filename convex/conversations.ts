@@ -1,10 +1,6 @@
 import { internalMutation, mutation, query } from './_generated/server'
 import { v } from 'convex/values'
-
-const contextMsg = v.object({
-  role: v.union(v.literal('user'), v.literal('assistant')),
-  content: v.string(),
-})
+import { conversationContextTurn } from './schema'
 
 export const create = mutation({
   args: {
@@ -87,7 +83,7 @@ export const compactContextPlaceholder = mutation({
 export const internalAppendContext = internalMutation({
   args: {
     conversationId: v.id('conversations'),
-    entry: contextMsg,
+    entry: conversationContextTurn,
   },
   handler: async (ctx, args) => {
     const conv = await ctx.db.get(args.conversationId)
@@ -101,7 +97,7 @@ export const internalAppendContext = internalMutation({
 export const internalSetContext = internalMutation({
   args: {
     conversationId: v.id('conversations'),
-    messages: v.array(contextMsg),
+    messages: v.array(conversationContextTurn),
   },
   handler: async (ctx, args) => {
     await ctx.db.patch(args.conversationId, {

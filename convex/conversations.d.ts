@@ -9,10 +9,13 @@ export declare const listForOwner: import("convex/server").RegisteredQuery<"publ
     _creationTime: number;
     ownerSessionId: string;
     title: string;
-    messages: {
+    messages: ({
         role: "user" | "assistant";
         content: string;
-    }[];
+    } | {
+        kind: "compaction";
+        payloadJson: string;
+    })[];
 }[]>>;
 export declare const get: import("convex/server").RegisteredQuery<"public", {
     conversationId: import("convex/values").GenericId<"conversations">;
@@ -21,10 +24,13 @@ export declare const get: import("convex/server").RegisteredQuery<"public", {
     _creationTime: number;
     ownerSessionId: string;
     title: string;
-    messages: {
+    messages: ({
         role: "user" | "assistant";
         content: string;
-    }[];
+    } | {
+        kind: "compaction";
+        payloadJson: string;
+    })[];
 } | null>>;
 /**
  * Recorta solo el campo `messages` (contexto del modelo). La tabla `messages`
@@ -52,13 +58,19 @@ export declare const internalAppendContext: import("convex/server").RegisteredMu
     entry: {
         role: "user" | "assistant";
         content: string;
+    } | {
+        kind: "compaction";
+        payloadJson: string;
     };
 }, Promise<void>>;
 export declare const internalSetContext: import("convex/server").RegisteredMutation<"internal", {
-    messages: {
+    messages: ({
         role: "user" | "assistant";
         content: string;
-    }[];
+    } | {
+        kind: "compaction";
+        payloadJson: string;
+    })[];
     conversationId: import("convex/values").GenericId<"conversations">;
 }, Promise<void>>;
 export declare const internalTrimContextTail: import("convex/server").RegisteredMutation<"internal", {

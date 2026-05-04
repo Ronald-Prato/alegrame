@@ -12,6 +12,7 @@ export declare const listForConversation: import("convex/server").RegisteredQuer
         toolName: string;
         status: "running" | "done" | "error";
     }[];
+    uiLogKind?: "conversation_compacted";
     role: "user" | "assistant";
     content: string;
     conversationId: import("convex/values").GenericId<"conversations">;
@@ -20,6 +21,10 @@ export declare const internalAdd: import("convex/server").RegisteredMutation<"in
     streaming?: boolean;
     role: "user" | "assistant";
     content: string;
+    conversationId: import("convex/values").GenericId<"conversations">;
+}, Promise<import("convex/values").GenericId<"messages">>>;
+/** Línea de sistema visible en el chat (historial tabla `messages` intacto por turnos). */
+export declare const internalAppendCompactNotice: import("convex/server").RegisteredMutation<"internal", {
     conversationId: import("convex/values").GenericId<"conversations">;
 }, Promise<import("convex/values").GenericId<"messages">>>;
 export declare const internalCreateAssistantDraft: import("convex/server").RegisteredMutation<"internal", {
@@ -51,6 +56,7 @@ export declare const internalGet: import("convex/server").RegisteredQuery<"inter
         toolName: string;
         status: "running" | "done" | "error";
     }[];
+    uiLogKind?: "conversation_compacted";
     role: "user" | "assistant";
     content: string;
     conversationId: import("convex/values").GenericId<"conversations">;

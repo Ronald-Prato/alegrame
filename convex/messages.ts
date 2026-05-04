@@ -31,6 +31,19 @@ export const internalAdd = internalMutation({
   },
 })
 
+/** Línea de sistema visible en el chat (historial tabla `messages` intacto por turnos). */
+export const internalAppendCompactNotice = internalMutation({
+  args: { conversationId: v.id('conversations') },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert('messages', {
+      conversationId: args.conversationId,
+      role: 'assistant',
+      content: '',
+      uiLogKind: 'conversation_compacted',
+    })
+  },
+})
+
 export const internalCreateAssistantDraft = internalMutation({
   args: { conversationId: v.id('conversations') },
   handler: async (ctx, args) => {
