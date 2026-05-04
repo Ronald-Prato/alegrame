@@ -244,6 +244,8 @@ function ChatWorkspace({ theme, onToggleTheme }) {
   const scrollContainerRef = useRef(null);
   const rutPdfInputRef = useRef(null);
   const composerTextareaRef = useRef(null);
+  /** Tras «Nueva conversación»: enfocar textarea cuando la UI esté lista (`busy` puede esperar mensajes). */
+  const pendingComposerFocusConversationIdRef = useRef(null);
   const stickToBottomRef = useRef(true);
   const speechRecognitionRef = useRef(null);
   /** Texto previo del compositor al iniciar dictado. */
@@ -320,6 +322,18 @@ function ChatWorkspace({ theme, onToggleTheme }) {
   useEffect(() => {
     stickToBottomRef.current = true;
   }, [conversationId]);
+
+  useLayoutEffect(() => {
+    const targetId = pendingComposerFocusConversationIdRef.current;
+    if (!conversationId || !targetId) return;
+    if (targetId !== conversationId) {
+      pendingComposerFocusConversationIdRef.current = null;
+      return;
+    }
+    if (!conversationReady || busy) return;
+    pendingComposerFocusConversationIdRef.current = null;
+    composerTextareaRef.current?.focus({ preventScroll: true });
+  }, [conversationReady, conversationId, busy]);
 
   useEffect(() => {
     setPendingOptimisticUser(null);
@@ -491,11 +505,13 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     if (conversations === undefined) return;
     const existingDraft = conversations.find(isEmptyDraftConversation);
     if (existingDraft) {
+      pendingComposerFocusConversationIdRef.current = existingDraft._id;
       setConversationInUrl(existingDraft._id);
       closeMobileSidebar();
       return;
     }
     const id = await createConversation({ ownerSessionId });
+    pendingComposerFocusConversationIdRef.current = id;
     setConversationInUrl(id);
     closeMobileSidebar();
   }
