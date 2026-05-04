@@ -32,6 +32,7 @@ import { createAlegraEstimateTools } from "./tools/alegraEstimates";
 import { createAlegraInvoiceTools } from "./tools/alegraInvoices";
 import { createAlegraColombiaPaymentCatalogTools } from "./tools/alegraColombiaPaymentCatalog";
 import { createAlegraStatsTools } from "./tools/alegraStats";
+import { createPeriodAnchorTools } from "./tools/periodAnchors";
 
 const MAX_CONTEXT_MESSAGES = 40;
 
@@ -189,9 +190,10 @@ const STATS_AGENT_INSTRUCTIONS = [
   'Eres el **asistente exclusivo de estadísticas** sobre datos en **Alegra** (facturas de venta, facturas de proveedor y contactos).',
   '',
   '## Regla obligatoria: rango de fechas para informes temporales',
-  '- Para rankings de ventas, clientes que más compraron, productos más/menos vendidos, comparativos mensuales ventas vs compras y gastos por período necesitas **`fecha_inicio`** y **`fecha_fin`** (`YYYY-MM-DD`) **antes** de llamar herramientas.',
+  '- Para rankings de ventas, clientes que más compraron, productos más/menos vendidos, comparativos mensuales ventas vs compras y gastos por período necesitas **`fecha_inicio`** y **`fecha_fin`** (`YYYY-MM-DD`) **antes** de llamar herramientas Alegra.',
+  '- **Fechas relativas** («el mes pasado», «este mes», «este año», «lo que va del año», «últimos N días»): invoca **`resolver_rango_fechas_relativo`** con **`preset`** adecuado y **`zona_horaria`** IANA (**`America/Bogota`** por defecto si el usuario no indicó país/zona). Usa **`fecha_inicio`** y **`fecha_fin`** que devuelve en las llamadas siguientes.',
   '- Si el usuario da solo un año natural (ej. 2025), usa **2025-01-01** y **2025-12-31** y confírmalo en una línea.',
-  '- Si dice «últimos 4 meses» sin fechas exactas, **pregunta** las dos fechas concretas o pide cuántos meses y calcula las cotas **confirmadas por el usuario** (no inventes el día «hoy»).',
+  '- Si dice «últimos 4 meses» u otro período **multi-mes ambiguo** sin fechas, **pregunta** cotas claras **o** ofrece separar por mes — no extrapoles con reglas inventadas.',
   '- **Excepción**: `stats_contar_clientes_por_ciudad` es un **snapshot** del maestro de contactos y **no** exige rango de ventas.',
   '',
   '## Formato',
@@ -204,6 +206,7 @@ const STATS_AGENT_INSTRUCTIONS = [
   '- Pagos por «declaración de renta» suelen estar en **facturas de proveedor** con texto/categorías heterogéneas; usa filtros de texto y advierte si puede haber pagos fuera de Alegra.',
   '',
   '## Herramientas disponibles',
+  '- **resolver_rango_fechas_relativo**: ancla períodos naturales («mes pasado», MTD/YTD, últimos N días) usando la fecha del servidor **y** zona IANA opcional (**`America/Bogota`** por defecto). **Úsala** cuando falten **`fecha_inicio`/`fecha_fin`** explícitos.',
   '- **stats_ranking_clientes_facturacion**: ranking de clientes por suma de `total` de facturas de venta en el rango.',
   '- **stats_ranking_productos_por_lineas_factura**: productos más/menos vendidos por líneas (`cantidad` o `importe` estimado); puede fallar si hay demasiadas facturas — reduce fechas.',
   '- **stats_comparativo_mensual_ventas_vs_compras**: serie mensual ventas vs compras a proveedores (proxy de margen operativo simple).',
@@ -226,7 +229,8 @@ const AGENT_INSTRUCTIONS = [
   '',
   '### Estadísticas e informes numéricos',
   '- Preguntas de **estadísticas**, **rankings**, **totales por fechas**, **productos más/menos vendidos**, **cliente que más compró o mejor cliente por facturación**, **ventas por mes / últimos meses**, **comparativos de ventas vs compras**, **cuántos clientes en una ciudad**, **sumas de facturas de proveedor** ligadas a renta/declaraciones u otros gastos: **transfiere** al agente **`EstadisticasAlegra`** con la herramienta de handoff **`transfer_to_EstadisticasAlegra`** (no intentes resolverlas solo con listados manuales de facturas).',
-  '- **Antes de transferir**, si el usuario no dio **`fecha_inicio`** y **`fecha_fin`** (`YYYY-MM-DD`) para un informe temporal, **pídeselas**. Si la pregunta es solo «cuántos clientes en Bogotá» (sin serie temporal de ventas), puedes transferir igual — el especialista no necesita rango de ventas para ese caso.',
+  '- Para informes temporales puedes obtener **`fecha_inicio`** y **`fecha_fin`** antes de transferir usando **`resolver_rango_fechas_relativo`** si el usuario habla en relativo («el mes pasado», «este año», últimos N días con número). **`America/Bogota`** como zona si no aclaró otro país.',
+  '- **Si el usuario dio fechas explícitas o un año natural claro**, no es obligatorio la herramienta de período; si faltan y no es caso relativo que la cubra, **pídele** cotas **`YYYY-MM-DD`**. Para «solo cuántos clientes en Bogotá» puedes transferir sin rango.',
   '',
   '### Negocio: «mangas» = ítems del inventario',
   '- Si el usuario dice **«mangas»**, **«manga»** o frases como «mangas de silicona», «mangas naranjas», etc., en **este negocio** casi siempre habla de **productos registrados en Alegra** (línea de mangas / fundas / protectores en catálogo), **no** de otros usos coloquiales de la palabra.',
@@ -234,7 +238,7 @@ const AGENT_INSTRUCTIONS = [
   '- Para mangas usa **listar_inventario_alegra** con `query` útil: «manga», «mangas», «silicona», color, pulgadas/cm, o la referencia si la dan; si vacía, reintenta con otro término.',
   '',
   '## Herramientas Alegra (API REST)',
-  'Tienes herramientas de **operación** sobre inventario, contactos, cotizaciones y facturas de venta; puedes encadenarlas (p. ej. listar contactos → crear factura borrador → vista previa → abrir con timbre). Para **estadísticas** usa la transferencia **`transfer_to_EstadisticasAlegra`**.',
+  'Tienes herramientas de **operación** sobre inventario, contactos, cotizaciones y facturas de venta; puedes encadenarlas (p. ej. listar contactos → crear factura borrador → vista previa → abrir con timbre). También tienes **`resolver_rango_fechas_relativo`** para períodos naturales relativos («mes pasado», etc.) antes de handoff estadísticos. Para **estadísticas** usa la transferencia **`transfer_to_EstadisticasAlegra`**.',
   '',
   '### Inventario / ítems',
   '- **listar_inventario_alegra**: GET `/items` — catálogo, ids, stock, precios.',
@@ -349,20 +353,21 @@ function createEstadisticasAlegraAgent(modelName: string) {
   return new Agent({
     name: "EstadisticasAlegra",
     handoffDescription:
-      "Úsalo **en lugar del asistente principal** cuando la conversación sea de **estadísticas o informes numéricos** sobre datos históricos en Alegra: ejemplos «¿Cuál fue el producto más vendido del 2025?», «¿Qué cliente nos compró más?», «¿Cuál es nuestro mejor cliente por facturación?», ventas en los últimos cuatro meses, ranking de productos más vendidos y menos vendidos en un año, mes de mayor diferencia entre ventas de facturación y compras a proveedores (proxy de margen operativo simple), cuántos clientes hay en Bogotá según dirección en contactos, cuánto se registró como gasto relacionado con declaración de renta en facturas de proveedor mediante filtros por texto/categorías. **Regla:** para cualquier **resumen global en el tiempo** debes tener siempre **fecha_inicio** y **fecha_fin** (`YYYY-MM-DD`) antes de ejecutar herramientas de agregación; si el usuario solo da el año, convierte a 1 enero / 31 diciembre y confirma.",
+      "Úsalo **en lugar del asistente principal** cuando la conversación sea de **estadísticas o informes numéricos** sobre datos históricos en Alegra: ejemplos «¿Cuál fue el producto más vendido del 2025?», «¿Qué cliente nos compró más?», «¿Cuál es nuestro mejor cliente por facturación?», ventas en los últimos cuatro meses, ranking de productos más vendidos y menos vendidos en un año, mes de mayor diferencia entre ventas de facturación y compras a proveedores (proxy de margen operativo simple), cuántos clientes hay en Bogotá según dirección en contactos, cuánto se registró como gasto relacionado con declaración de renta en facturas de proveedor mediante filtros por texto/categorías. **Regla:** antes de estadísticas necesitas **`fecha_inicio`** y **`fecha_fin`** (`YYYY-MM-DD`); ante lenguaje relativo («mes pasado», últimos N días) puedes obtenerlas con **`resolver_rango_fechas_relativo`** (fallback zona **`America/Bogota`**). Si el usuario solo da el año natural, convierte a **1 ene / 31 dic** y confirma.",
     instructions: STATS_AGENT_INSTRUCTIONS,
     model: modelName,
     modelSettings: {
       ...getDefaultModelSettings(modelName),
       toolChoice: "auto",
     },
-    tools: createAlegraStatsTools(),
+    tools: [...createPeriodAnchorTools(), ...createAlegraStatsTools()],
   });
 }
 
 function createAlegraOrchestratorAgent(modelName: string) {
   const estadisticasAgent = createEstadisticasAlegraAgent(modelName);
   const tools = [
+    ...createPeriodAnchorTools(),
     ...createAlegraItemTools(),
     ...createAlegraContactTools(),
     ...createAlegraEstimateTools(),

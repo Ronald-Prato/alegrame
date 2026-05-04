@@ -246,6 +246,8 @@ function ChatWorkspace({ theme, onToggleTheme }) {
   const composerTextareaRef = useRef(null);
   /** Tras «Nueva conversación»: enfocar textarea cuando la UI esté lista (`busy` puede esperar mensajes). */
   const pendingComposerFocusConversationIdRef = useRef(null);
+  /** Tras enviar un mensaje: enfocar de nuevo cuando termine el agente (`loading` → false) y el textarea se habilite. */
+  const pendingComposerFocusAfterAgentRef = useRef(null);
   const stickToBottomRef = useRef(true);
   const speechRecognitionRef = useRef(null);
   /** Texto previo del compositor al iniciar dictado. */
@@ -335,8 +337,22 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     composerTextareaRef.current?.focus({ preventScroll: true });
   }, [conversationReady, conversationId, busy]);
 
+  useLayoutEffect(() => {
+    if (loading) return;
+    const pendingConv = pendingComposerFocusAfterAgentRef.current;
+    if (!pendingConv) return;
+    if (pendingConv !== conversationId) {
+      pendingComposerFocusAfterAgentRef.current = null;
+      return;
+    }
+    if (!conversationReady || busy) return;
+    pendingComposerFocusAfterAgentRef.current = null;
+    composerTextareaRef.current?.focus({ preventScroll: true });
+  }, [loading, conversationReady, conversationId, busy]);
+
   useEffect(() => {
     setPendingOptimisticUser(null);
+    pendingComposerFocusAfterAgentRef.current = null;
   }, [conversationId]);
 
   useEffect(() => {
@@ -532,6 +548,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
       if (el) el.scrollTop = el.scrollHeight;
     });
 
+    pendingComposerFocusAfterAgentRef.current = conversationId;
     sendMessage({
       ownerSessionId,
       conversationId,
@@ -584,6 +601,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
 
     try {
       const dataUrl = await readFileAsDataUrl(file);
+      pendingComposerFocusAfterAgentRef.current = conversationId;
       sendMessage({
         ownerSessionId,
         conversationId,

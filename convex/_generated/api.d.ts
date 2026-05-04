@@ -19,6 +19,7 @@ import type * as tools_alegraEstimates from "../tools/alegraEstimates.js";
 import type * as tools_alegraInventory from "../tools/alegraInventory.js";
 import type * as tools_alegraInvoices from "../tools/alegraInvoices.js";
 import type * as tools_alegraStats from "../tools/alegraStats.js";
+import type * as tools_periodAnchors from "../tools/periodAnchors.js";
 
 import type {
   ApiFromModules,
@@ -38,6 +39,7 @@ declare const fullApi: ApiFromModules<{
   "tools/alegraInventory": typeof tools_alegraInventory;
   "tools/alegraInvoices": typeof tools_alegraInvoices;
   "tools/alegraStats": typeof tools_alegraStats;
+  "tools/periodAnchors": typeof tools_periodAnchors;
 }>;
 
 /**
