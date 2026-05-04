@@ -312,7 +312,7 @@ export function createAlegraStatsTools() {
     tool({
       name: 'stats_ranking_clientes_facturacion',
       description:
-        'Ranking de **clientes** por **facturación** en Alegra usando solo el listado de facturas de venta (GET `/invoices` paginado). Agrega totales por cliente en el rango inclusivo `[fecha_inicio, fecha_fin]`. Respeta `estados` típicos `open,closed` (excluye borradores/anuladas si así lo configuras).',
+        'Facturación de **ventas** en un rango (`GET /invoices` paginado). **Siempre** devuelve **`totales_periodo`**: suma del campo `total` de **todas** las facturas del rango y cuántas facturas hubo — úsalo para «¿cuánto vendimos?», «total facturado este mes/año», etc. Además devuelve un **ranking** de clientes limitado por `top_n` (para top clientes, no para el total global). `estados` típico `open,closed`.',
       parameters: z.object({
         fecha_inicio: z.string().describe('Inicio inclusive `YYYY-MM-DD`.'),
         fecha_fin: z.string().describe('Fin inclusive `YYYY-MM-DD`.'),
@@ -361,15 +361,25 @@ export function createAlegraStatsTools() {
           }))
           .sort((x, y) => y.facturacion_total_aprox - x.facturacion_total_aprox)
 
+        let facturacionTotalPeriodo = 0
+        for (const s of fetched.summaries) {
+          facturacionTotalPeriodo += s.total
+        }
+
         const n = Math.max(1, Math.floor(args.top_n))
         return JSON.stringify({
           ok: true,
           periodo: { desde: a.value, hasta: b.value },
+          totales_periodo: {
+            facturacion_total: Math.round(facturacionTotalPeriodo * 100) / 100,
+            numero_facturas: fetched.summaries.length,
+            clientes_distintos: byClient.size,
+          },
           facturas_consideradas: fetched.summaries.length,
           ranking: ranking.slice(0, n),
           advertencias: fetched.warnings,
           nota:
-            'Totales según campo `total` de cada factura en Alegra (puede incluir impuestos según configuración). Para «mejor cliente» define con el usuario si es por facturación, frecuencia o margen.',
+            'El **total global** del período está en `totales_periodo.facturacion_total` (suma de `total` por factura; puede incluir impuestos según Alegra). El `ranking` solo lista los `top_n` clientes. Para «mejor cliente» aclara si es por facturación u otro criterio.',
         })
       },
     }),

@@ -37,7 +37,7 @@ import { createPeriodAnchorTools } from "./tools/periodAnchors";
 const MAX_CONTEXT_MESSAGES = 40;
 
 /** User + assistant text turns in `conversations.messages` (las filas compaction no cuentan). */
-const CONTEXT_COMPACTION_PLAIN_MIN = 10;
+const CONTEXT_COMPACTION_PLAIN_MIN = 20;
 
 type ConvexContextEntry =
   | { role: "user" | "assistant"; content: string }
@@ -201,13 +201,14 @@ const STATS_AGENT_INSTRUCTIONS = [
   '',
   '## Alcance',
   '- Solo lecturas agregadas mediante tus herramientas; **no** uses herramientas de alta/edición del otro agente.',
+  '- **Total de ventas / facturación global** en un intervalo: **`stats_ranking_clientes_facturacion`** con `fecha_inicio`/`fecha_fin` → lee **`totales_periodo.facturacion_total`** y menciona filtros **`estados`** (p. ej. `open,closed`) en la respuesta.',
   '- Para «mejor cliente» aclara si es por **facturación total** (por defecto en rankings), **número de facturas** u otro criterio.',
   '- Totales pueden incluir impuestos según configuración Alegra — dilo cuando corresponda.',
   '- Pagos por «declaración de renta» suelen estar en **facturas de proveedor** con texto/categorías heterogéneas; usa filtros de texto y advierte si puede haber pagos fuera de Alegra.',
   '',
   '## Herramientas disponibles',
   '- **resolver_rango_fechas_relativo**: ancla períodos naturales («mes pasado», MTD/YTD, últimos N días) usando la fecha del servidor **y** zona IANA opcional (**`America/Bogota`** por defecto). **Úsala** cuando falten **`fecha_inicio`/`fecha_fin`** explícitos.',
-  '- **stats_ranking_clientes_facturacion**: ranking de clientes por suma de `total` de facturas de venta en el rango.',
+  '- **stats_ranking_clientes_facturacion**: ranking por cliente **y** objeto **`totales_periodo`** (facturación total del rango y número de facturas) — **úsalo** para preguntas del tipo «¿cuánto vendimos?», «total facturado este año». El campo `ranking` solo muestra hasta `top_n` clientes; el global va en **`totales_periodo`**, no hay que sumar el ranking a mano.',
   '- **stats_ranking_productos_por_lineas_factura**: productos más/menos vendidos por líneas (`cantidad` o `importe` estimado); puede fallar si hay demasiadas facturas — reduce fechas.',
   '- **stats_comparativo_mensual_ventas_vs_compras**: serie mensual ventas vs compras a proveedores (proxy de margen operativo simple).',
   '- **stats_contar_clientes_por_ciudad**: cuenta clientes cuya ciudad coincide (útil Bogotá).',

@@ -87,6 +87,13 @@ function ConversationCompactBadge() {
   );
 }
 
+/** Muestra el aviso solo hasta el siguiente mensaje del usuario (incl. optimista al enviar). */
+function compactionNoticeVisible(displayMessages, index) {
+  return !displayMessages
+    .slice(index + 1)
+    .some((row) => row.role === "user");
+}
+
 function ToolEventIcon({ status }) {
   if (status === "running") {
     return (
@@ -246,8 +253,6 @@ function ChatWorkspace({ theme, onToggleTheme }) {
   const composerTextareaRef = useRef(null);
   /** Tras «Nueva conversación»: enfocar textarea cuando la UI esté lista (`busy` puede esperar mensajes). */
   const pendingComposerFocusConversationIdRef = useRef(null);
-  /** Tras enviar un mensaje: enfocar de nuevo cuando termine el agente (`loading` → false) y el textarea se habilite. */
-  const pendingComposerFocusAfterAgentRef = useRef(null);
   const stickToBottomRef = useRef(true);
   const speechRecognitionRef = useRef(null);
   /** Texto previo del compositor al iniciar dictado. */
@@ -302,6 +307,12 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     docLoading ||
     (canLoadMessages && messages === undefined);
 
+  /** Inputs del compositor inhabilitados (sin sesión válida); no usar para bloquear mientras el agente responde. */
+  const composerDisabled =
+    conversations === undefined || !conversationReady;
+  /** No enviar hasta que termine la acción y/o el último mensaje en streaming desde Convex. */
+  const sendingBlocked = loading || streamingAssistant;
+
   useLayoutEffect(() => {
     const el = composerTextareaRef.current;
     if (!el) return;
@@ -337,22 +348,8 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     composerTextareaRef.current?.focus({ preventScroll: true });
   }, [conversationReady, conversationId, busy]);
 
-  useLayoutEffect(() => {
-    if (loading) return;
-    const pendingConv = pendingComposerFocusAfterAgentRef.current;
-    if (!pendingConv) return;
-    if (pendingConv !== conversationId) {
-      pendingComposerFocusAfterAgentRef.current = null;
-      return;
-    }
-    if (!conversationReady || busy) return;
-    pendingComposerFocusAfterAgentRef.current = null;
-    composerTextareaRef.current?.focus({ preventScroll: true });
-  }, [loading, conversationReady, conversationId, busy]);
-
   useEffect(() => {
     setPendingOptimisticUser(null);
-    pendingComposerFocusAfterAgentRef.current = null;
   }, [conversationId]);
 
   useEffect(() => {
@@ -425,7 +422,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     const Rec =
       typeof window !== "undefined" &&
       (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!Rec || busy || !conversationId || !conversationReady) return;
+    if (!Rec || composerDisabled) return;
 
     if (dictationListening || speechRecognitionRef.current) {
       abortSpeechDictation();
@@ -534,9 +531,9 @@ function ChatWorkspace({ theme, onToggleTheme }) {
 
   function handleSubmit(e) {
     e?.preventDefault?.();
-    abortSpeechDictation();
     const text = draft.trim();
-    if (!text || busy || !conversationId || !conversationReady) return;
+    if (!text || sendingBlocked || composerDisabled) return;
+    abortSpeechDictation();
 
     setError(null);
     setDraft("");
@@ -544,11 +541,11 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     setLoading(true);
     stickToBottomRef.current = true;
     queueMicrotask(() => {
+      composerTextareaRef.current?.focus({ preventScroll: true });
       const el = scrollContainerRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     });
 
-    pendingComposerFocusAfterAgentRef.current = conversationId;
     sendMessage({
       ownerSessionId,
       conversationId,
@@ -577,7 +574,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
   async function handleRutPdfChange(e) {
     const file = e.target.files?.[0];
     e.target.value = "";
-    if (!file || busy || !conversationId || !conversationReady) return;
+    if (!file || sendingBlocked || composerDisabled) return;
     abortSpeechDictation();
     if (file.type !== "application/pdf") {
       setError("Solo se admite un archivo PDF.");
@@ -588,6 +585,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
     setLoading(true);
     stickToBottomRef.current = true;
     queueMicrotask(() => {
+      composerTextareaRef.current?.focus({ preventScroll: true });
       const el = scrollContainerRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     });
@@ -601,7 +599,6 @@ function ChatWorkspace({ theme, onToggleTheme }) {
 
     try {
       const dataUrl = await readFileAsDataUrl(file);
-      pendingComposerFocusAfterAgentRef.current = conversationId;
       sendMessage({
         ownerSessionId,
         conversationId,
@@ -677,14 +674,14 @@ function ChatWorkspace({ theme, onToggleTheme }) {
             void handleSubmit(e);
           }
         }}
-        disabled={busy}
+        disabled={composerDisabled}
         autoComplete="off"
       />
       <div className="chat-composer-footer">
         <button
           type="button"
           className="chat-rut-upload"
-          disabled={busy || !conversationId || !conversationReady}
+          disabled={sendingBlocked || composerDisabled}
           title="Adjuntar PDF (certificado RUT u otro documento para contacto)"
           aria-label="Adjuntar PDF para análisis del agente"
           onClick={() => rutPdfInputRef.current?.click()}
@@ -697,9 +694,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
         <button
           type="button"
           className={`chat-voice${dictationListening ? " chat-voice-listening" : ""}`}
-          disabled={
-            busy || !speechSupported || !conversationId || !conversationReady
-          }
+          disabled={composerDisabled || !speechSupported}
           title={
             !speechSupported
               ? "Dictado no disponible en este navegador (usa Chrome, Edge o Safari)."
@@ -718,7 +713,7 @@ function ChatWorkspace({ theme, onToggleTheme }) {
         <button
           type="submit"
           className="chat-send"
-          disabled={busy || !draft.trim()}
+          disabled={sendingBlocked || !draft.trim() || composerDisabled}
           aria-label="Enviar mensaje"
         >
           <svg className="chat-send-icon" viewBox="0 0 20 20" aria-hidden>
@@ -898,8 +893,11 @@ function ChatWorkspace({ theme, onToggleTheme }) {
                   onScroll={handleChatScroll}
                 >
                   <ul className="chat-messages" aria-live="polite">
-                    {displayMessages.map((m) => {
+                    {displayMessages.map((m, idx) => {
                       if (m.uiLogKind === "conversation_compacted") {
+                        if (!compactionNoticeVisible(displayMessages, idx)) {
+                          return null;
+                        }
                         return (
                           <li
                             key={m._id}
