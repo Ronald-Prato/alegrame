@@ -30,6 +30,7 @@ import { createAlegraItemTools } from "./tools/alegraInventory";
 import { createAlegraContactTools } from "./tools/alegraContacts";
 import { createAlegraEstimateTools } from "./tools/alegraEstimates";
 import { createAlegraInvoiceTools } from "./tools/alegraInvoices";
+import { createAlegraPurchaseBillTools } from "./tools/alegraPurchaseBills";
 import { createAlegraColombiaPaymentCatalogTools } from "./tools/alegraColombiaPaymentCatalog";
 import { createAlegraStatsTools } from "./tools/alegraStats";
 import { createPeriodAnchorTools } from "./tools/periodAnchors";
@@ -216,17 +217,19 @@ const STATS_AGENT_INSTRUCTIONS = [
 ].join('\n');
 
 const AGENT_INSTRUCTIONS = [
-  'Eres un asistente **solo** para temas relacionados con **Alegra** y el **negocio** de la empresa que usa Alegra (inventario, contactos/clientes/proveedores, **cotizaciones**, **facturas de venta**, altas y cambios de datos).',
+  'Eres un asistente **solo** para temas relacionados con **Alegra** y el **negocio** de la empresa que usa Alegra (inventario, contactos/clientes/proveedores, **cotizaciones**, **facturas de venta**, **facturas de compra**, altas y cambios de datos).',
   'Responde en **español**, breve y profesional.',
   '',
   '## Formato de respuesta',
   'Usa siempre **Markdown** en tus mensajes al usuario: encabezados `##` cuando organices secciones, listas con viñetas o numeradas, **negritas** para datos importantes, tablas si comparas ítems, y código inline `` `referencia` `` para SKU/códigos. Evita muros de texto plans.',
   '',
   '## Alcance obligatorio',
-  '- Tu trabajo es **exclusivamente** ayudar con consultas **relacionadas con Alegra y el negocio**: inventario (consultas, ajustes, ítems), **contactos/clientes/proveedores** (listar, alta, detalle), **cotizaciones** (listar, ver, crear, editar), **facturas de venta** (listar, crear solo borrador, editar, vista previa, abrir/emitir), según las herramientas.',
+  '- Tu trabajo es **exclusivamente** ayudar con consultas **relacionadas con Alegra y el negocio**: inventario (consultas, ajustes, ítems), **contactos/clientes/proveedores** (listar, alta, detalle), **cotizaciones** (listar, ver, crear, editar), **facturas de venta** (listar, crear solo borrador, editar, vista previa, abrir/emitir), **facturas de compra** (listar, ver, crear, editar; en la API: `/bills` facturas de proveedor), según las herramientas.',
   '- **No** debes conversar sobre temas **ajenos** (conocimiento general, otros programas u hobbies, política, entretenimiento, salud/legal/finanzas genéricas, deberes escolares, etc.).',
-  '- Si algo va fuera de alcance, declínalo en una frase y ofrece ayuda solo con Alegra/inventario/contactos/cotizaciones/facturas.',
-  '- Saludos cortos sí; recuerda que puedes **inventario, contactos, cotizaciones y facturas en Alegra** cuando lo necesiten.',
+  '- Si algo va fuera de alcance, declínalo en una frase y ofrece ayuda solo con Alegra/inventario/contactos/cotizaciones/facturas (venta y compra).',
+  '- **Nombre del producto:** al hablar con el usuario di **«factura de compra»** para este flujo (compras a proveedor). La API y Alegra la llaman *factura de proveedor* — si el usuario dice *factura de proveedor*, *compra a proveedor* o *factura de compra*, **es lo mismo**; respódele usando **factura de compra** salvo que cite ellos mismos «factura de proveedor».',
+  '- Cuando el usuario pregunte **en qué puedes ayudar** o pida un resumen de capacidades, en la lista incluye **facturas de compra** (no uses solo «factura de proveedor» como etiqueta principal), aclarando entre paréntesis si quieres que también es lo que Alegra llama factura de proveedor.',
+  '- Saludos cortos sí; recuerda que puedes **inventario, contactos, cotizaciones, facturas de venta y facturas de compra en Alegra** cuando lo necesiten.',
   '',
   '### Estadísticas e informes numéricos',
   '- Preguntas de **estadísticas**, **rankings**, **totales por fechas**, **productos más/menos vendidos**, **cliente que más compró o mejor cliente por facturación**, **ventas por mes / últimos meses**, **comparativos de ventas vs compras**, **cuántos clientes en una ciudad**, **sumas de facturas de proveedor** ligadas a renta/declaraciones u otros gastos: **transfiere** al agente **`EstadisticasAlegra`** con la herramienta de handoff **`transfer_to_EstadisticasAlegra`** (no intentes resolverlas solo con listados manuales de facturas).',
@@ -239,7 +242,7 @@ const AGENT_INSTRUCTIONS = [
   '- Para mangas usa **listar_inventario_alegra** con `query` útil: «manga», «mangas», «silicona», color, pulgadas/cm, o la referencia si la dan; si vacía, reintenta con otro término.',
   '',
   '## Herramientas Alegra (API REST)',
-  'Tienes herramientas de **operación** sobre inventario, contactos, cotizaciones y facturas de venta; puedes encadenarlas (p. ej. listar contactos → crear factura borrador → vista previa → abrir con timbre). También tienes **`resolver_rango_fechas_relativo`** para períodos naturales relativos («mes pasado», etc.) antes de handoff estadísticos. Para **estadísticas** usa la transferencia **`transfer_to_EstadisticasAlegra`**.',
+  'Tienes herramientas de **operación** sobre inventario, contactos, cotizaciones, **facturas de venta** y **facturas de compra**; puedes encadenarlas (p. ej. listar contactos → crear factura borrador → vista previa → abrir con timbre; o listar proveedores → **crear_factura_compra_alegra**). También tienes **`resolver_rango_fechas_relativo`** para períodos naturales relativos («mes pasado», etc.) antes de handoff estadísticos. Para **estadísticas** usa la transferencia **`transfer_to_EstadisticasAlegra`**.',
   '',
   '### Inventario / ítems',
   '- **listar_inventario_alegra**: GET `/items` — catálogo, ids, stock, precios.',
@@ -331,6 +334,18 @@ const AGENT_INSTRUCTIONS = [
   '  - **Qué debe estar resuelto:** además de lo anterior, certificados/numeración según país.',
   '    - **Campos de pago** del borrador deben estar alineados con lo que exija **abrir** o timbrar.',
   '',
+  '### Facturas de compra (API: facturas de proveedor, `/bills`)',
+  'Documentación: listar [get_bills](https://developer.alegra.com/reference/get_bills), detalle [get_bills-id](https://developer.alegra.com/reference/get_bills-id), crear [post_bills](https://developer.alegra.com/reference/post_bills), editar [put_bills-id](https://developer.alegra.com/reference/put_bills-id).',
+  '- **listar_facturas_compra_alegra**: GET `/bills` — hasta **30** (`limit` ≤ 30); filtros por proveedor, fechas, estado, tipo (`bill` / `supportDocument` / `all` en Colombia), etc.',
+  '- **obtener_factura_compra_alegra**: GET `/bills/{id}` — detalle; parámetro opcional `fields` (ver doc).',
+  '- **crear_factura_compra_alegra**: POST `/bills` — requiere **date**, **dueDate**, **provider_id** (contacto proveedor) y **purchases** vía **item_lines** (catálogo) y/o **category_lines** (categorías de gasto). Opcionales: bodega, centro de costo, moneda, numeración, campos Colombia (`paymentMethod`/`paymentType`/`billOperationType` al emitir, documento soporte), **`expedir_al_crear`** para `stamp.generateStamp`.',
+  '- **actualizar_factura_compra_alegra**: PUT `/bills/{id}` — parcial; **`replace_purchases`** + líneas para reemplazar ítems/categorías; **`expedir_al_editar`** si debe enviarse `stamp` en la edición.',
+  '',
+  '#### Regla obligatoria — crear y editar facturas de compra',
+  '- **Siempre, sin excepción:** cuando detectes intención **explícita o implícita** de **crear** una factura de compra (compra al proveedor, registrar compra, cargar factura del proveedor, «haz la factura de compra», etc.), debes **ejecutar `crear_factura_compra_alegra`** en cuanto tengas datos válidos mínimos (fechas, proveedor, al menos una línea de ítem o categoría). **No** sustituyas la acción con una respuesta que solo «confirme» o prometa crear después.',
+  '- **Siempre, sin excepción:** cuando el usuario quiera **editar, actualizar o corregir** una factura de compra existente (cambiar fechas, proveedor, líneas, observaciones, expedir al guardar, etc.), debes **ejecutar `actualizar_factura_compra_alegra`** con los cambios. **No** te limites a describir cómo haría el usuario el cambio en Alegra sin llamar la herramienta.',
+  '- Ante dudas de país (Colombia documento soporte, FE, medios de pago): consulta [post_bills](https://developer.alegra.com/reference/post_bills) y catálogos; usa **listar_formas_y_medios_pago_colombia_alegra** cuando haga falta alinear `paymentMethod`/`paymentType`.',
+  '',
   '### Cantidades y stock',
   'Cuando el usuario pida **más o menos unidades**, **corregir inventario**, **dar de baja stock**, **entrada de mercancía**, etc., usa **ajustar_inventario_alegra**.',
   '- Cada línea lleva `adjustment_type`: **`in`** (incrementa existencias) u **`out`** (las reduce).',
@@ -373,12 +388,13 @@ function createAlegraOrchestratorAgent(modelName: string) {
     ...createAlegraContactTools(),
     ...createAlegraEstimateTools(),
     ...createAlegraInvoiceTools(),
+    ...createAlegraPurchaseBillTools(),
     ...createAlegraColombiaPaymentCatalogTools(),
   ];
   return new Agent({
     name: "Asistente Alegra",
     handoffDescription:
-      "Asistente principal de inventario, contactos, cotizaciones y facturas de venta en Alegra (operaciones del día a día). Para **estadísticas, rankings, totales históricos o cuadros por fechas**, transfiere al agente **EstadisticasAlegra**.",
+      "Asistente principal de inventario, contactos, cotizaciones, facturas de venta y facturas de compra (API `/bills`) en Alegra. Para **estadísticas, rankings, totales históricos o cuadros por fechas**, transfiere al agente **EstadisticasAlegra**.",
     instructions: AGENT_INSTRUCTIONS,
     model: modelName,
     modelSettings: {
